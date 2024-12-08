@@ -29,4 +29,5 @@ password="password"
 database="database" 
 DATABASE_URL='path_to_database'
 
-##Запуск приложения Чтобы запустить приложение, выполните следующую команду: python3 app.py
+##Запуск приложения 
+##Чтобы запустить приложение, выполните следующую команду: python3 app.py
