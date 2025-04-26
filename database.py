@@ -1,9 +1,10 @@
+import os
 from sqlalchemy import Column, Integer, String, DateTime
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from dotenv import load_dotenv
 load_dotenv()
-import os
+
 
 host = os.getenv('host')
 port = os.getenv('port')
@@ -11,7 +12,7 @@ user = os.getenv('user')
 password = os.getenv('password')
 database = os.getenv('database')
 
-DATABASE_URL = f"postgresql+asyncpg://{user}:{password}@{host}/{database}"
+DATABASE_URL = f"postgresql+asyncpg://{user}:{password}@{host}/{database}"  #service основного проекта(_userbot, _visited_users)
 
 engine = create_async_engine(url=DATABASE_URL)
 new_session = async_sessionmaker(engine, expire_on_commit=False)
