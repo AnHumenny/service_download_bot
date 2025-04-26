@@ -1,6 +1,8 @@
 import asyncio
+import datetime
 import logging
-from asyncio import sleep
+from functools import wraps
+import jwt
 from aiogram import Bot, Dispatcher, types
 import os
 import base64
@@ -11,7 +13,6 @@ from aiogram.types import Message, BufferedInputFile
 from aiogram.filters import Command, CommandObject, StateFilter
 import subprocess
 import lists
-import keyboards
 from repository import Repo
 from dotenv import load_dotenv
 
@@ -23,123 +24,132 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 class SelectInfo(StatesGroup):
+    """registered user"""
     register_user = State()
 
+class AuthStates(StatesGroup):
+    """states for authentication and output"""
+    waiting_for_login = State()
+    waiting_for_password = State()
+
+class Form(StatesGroup):
+    """token (state: FSMContext)"""
+    waiting_for_token = State()
+
 class Info:
+    """Variables for throwing"""
     form = None
     city = None
     street = None
     home = None
     apartment = None
-
-class Registred:
-    admin_OK = False
-    user_OK = False
-    login = None
-    name = None
     count = 0
 
-@dp.message(StateFilter(None), Command("start"))
-async def start_handler(msg: Message, state=FSMContext):
-    await msg.answer("Привет! \n")
-    await msg.answer(
-        text="Знаешь как зайти? :)",
-        reply_markup=keyboards.make_row_keyboard(['xxxxx'])
-    )
-    await state.set_state(SelectInfo.register_user)
 
-# ввод и проверка пароля
-@dp.message(SelectInfo.register_user)
-async def cmd_auth(msg: Message, state: FSMContext):
-    if Registred.count > 3:
-        Registred.count = 0
-    autent = msg.text.split('|')
-    if len(autent) != 2:
-        Registred.count += 1
-        await msg.answer(
-            text=f"Что то за не то с паролем :("
-        )
-        if Registred.count == 3:
-            await msg.answer(
-                text="Теперь ждём минуту :("
+async def create_jwt_token(data):
+    """create token"""
+    token = jwt.encode({
+        **data,
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+    }, os.getenv("SECRET_KEY"), algorithm='HS256')
+    return token
+
+
+async def decode_jwt_token(token):
+    """decode token"""
+    try:
+        decoded_data = jwt.decode(token, os.getenv("SECRET_KEY"), algorithms=['HS256'])
+        return decoded_data
+    except jwt.ExpiredSignatureError:
+        print("Token has expired.")
+        return None
+    except jwt.InvalidTokenError:
+        print("Invalid token.")
+        return None
+
+
+def token_required(func):
+    """check token"""
+    @wraps(func)
+    async def wrapper(message: types.Message, state: FSMContext, *args, **kwargs):
+        data = await state.get_data()
+        token = data.get("jwt_token")
+        if not token:
+            await message.answer("Нет сохранённого токена. Пройдите авторизацию через /start.")
+            return None
+        decoded_data = await decode_jwt_token(token)
+        if decoded_data:
+            return await func(message, state=state, *args, **kwargs)
+        else:
+            await message.answer("Токен недействителен или истёк. Авторизуйтесь снова.")
+            return None
+    return wrapper
+
+@dp.message(StateFilter(None), Command("start"))
+async def start_handler(message: types.Message, state: FSMContext):
+    """start(enter login)"""
+    await message.answer("Введите логин:")
+    await state.set_state(AuthStates.waiting_for_login)
+
+@dp.message(AuthStates.waiting_for_login)
+async def process_login(message: types.Message, state: FSMContext):
+    """start(enter password)"""
+    await state.update_data(login=message.text)
+    await message.answer("Теперь введите пароль:")
+    await state.set_state(AuthStates.waiting_for_password)
+
+
+@dp.message(AuthStates.waiting_for_password)
+async def process_password(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    login = user_data.get('login')
+    password = message.text
+    encoded_password = base64.b64encode(password.encode('utf-8'))
+    result = await Repo.select_pass(login, encoded_password)
+    if result is None:
+        Info.count += 1
+        if Info.count == 3:
+            await message.answer(
+                text="Неверный пароль. Ты заблокирован на 60 секунд."
             )
-            await Repo.insert_into_visited_date(msg.from_user.id, f"{msg.from_user.id} три некорректные авторизации :)")
-            await sleep(60)
-        return
-    else:
-        Registred.count += 1
-        auth = msg.text.split("|")
-        login = auth[0]
-        password = auth[1]
-        pass_wrd = password.encode('utf-8')
-        password = base64.b64encode(pass_wrd)
-        if len(login) == 0 or len(password) < 7:
-            await msg.answer(
-                text=f"Что то не получилось с паролем :("
+            user_id = message.from_user.id
+            await Repo.insert_into_visited_date(user_id, "Три неудачных попытки авторизации")
+            await asyncio.sleep(60)
+            await message.answer(
+                text="нажми /start"
             )
-            if Registred.count == 3:
-                await msg.answer(
-                    text="Теперь ждём минуту :("
-                )
-                await Repo.insert_into_visited_date(msg.from_user.id, f"{msg.from_user.id} три неверных пароля :)")
-                await sleep(60)
+            Info.count = 0
             await state.clear()
             return
-        else:
-            result = await Repo.select_pass(login, password, msg.from_user.id)
-            if result is None:
-                await msg.answer(
-                    text=f"Не зашло с паролем :("
-                )
-                Registred.count += 1
-                if Registred.count == 3:
-                    await msg.answer(
-                        text="Теперь ждём минуту :("
-                    )
-                    await Repo.insert_into_visited_date(msg.from_user.id, f"{msg.from_user.id} три хаотичных пароля :)")
-                    await sleep(60)
-                    await state.clear()
-                    return
-            else:
-                if result.tg_id not in lists.access:
-                    await msg.answer(
-                        text=f"Упс. Что то не так с данными :("
-                    )
-                    return
-                if result.status == "admin":
-                    Registred.admin_OK = True
-                if result.tg_id in lists.access:
-                    Registred.user_OK = True
-                    Registred.login = result.login
-                    Registred.name = result.name
-                    await Repo.insert_into_visited_date(Registred.name, f"зашёл в чат загрузки фото fttx ")
-                await msg.answer(
-                    text=f"Набери\n/help, {result.name}"
-                )
-                await bot.send_message(os.getenv("admin_id"), 'В бот зашёл ' + result.name)
-                await state.clear()
-                return
+    if result:
+        user_payload = {
+            'login': result.login,
+            'name': result.name,
+            'status': result.status,
+        }
+        token = await create_jwt_token(user_payload)
+        await Repo.insert_into_visited_date(result.name, "зашёл в чат")
+        await state.clear()
+        await state.update_data(jwt_token=token)
+        await message.answer(
+            text=f"Добро пожаловать, {result.name}!\nТеперь можешь написать /help."
+        )
+        return
+    await message.answer(text="Не зашло с паролем :(")
+    await state.set_state(AuthStates.waiting_for_login)
+
 
 @dp.message(Command("help"))
-async def cmd_start(message: types.Message):
-    if Registred.login not in lists.id_user and Registred.user_OK is False:
-        await message.answer(
-            text=f"Увы. Нет доступа к внутренней информации :("
-        )
-        return
-    else:
-        await message.answer(*lists.send)
+@token_required
+async def cmd_start(message: types.Message, state: FSMContext):
+    """help"""
+    await message.answer(*lists.send)
+
 
 @dp.message(Command("send"))
-async def cmd_send_photo(
-        message: Message,
-        command: CommandObject
-):
-    if Registred.login not in lists.id_user and Registred.user_OK is False:
-        await message.answer(
-            text=f"Увы. Нет доступа к внутренней информации :("
-        )
-        return
+@token_required
+async def cmd_send_photo(message: Message, command: CommandObject, state: FSMContext):
+    """Select route for loading and create directory if Ok"""
     if command.args is None:
         await message.answer(
             "Ошибка: не переданы аргументы"
@@ -155,7 +165,7 @@ async def cmd_send_photo(
     except ValueError:
         await message.answer(
             "Ошибка: неправильный формат команды. Пример:\n"
-            "/send fttx/Город/улица/дом/квартира(для ТО, подьезд/подвал,чердак)"
+            "/send fttx/Город/улица/дом/квартира(для ТО, подьезд/подвал, техэтаж, (иное))"
         )
         return
     dir_name = ""
@@ -182,38 +192,34 @@ async def cmd_send_photo(
         f"Фото будут загружен в {Info.city}/{Info.street}/{Info.home}/{Info.apartment}\n"
         f"Выберите и отправьте фотографии"
     )
-    await Repo.insert_into_visited_date(Registred.name,
+
+    data = await state.get_data()
+    token = data.get("jwt_token")
+    if not token:
+        await message.answer("Нет токена. Пройдите авторизацию через /start.")
+        return
+
+    decoded_data = await decode_jwt_token(token)
+    full_name = decoded_data.get("name") if decoded_data else None
+    await Repo.insert_into_visited_date(full_name,
                                         f"Добавил фото в "
                                         f"{Info.form}/{Info.city}/{Info.street}/{Info.home}/{Info.apartment}")
 
 @dp.message(F.photo)
+@token_required
 async def view_3(msg: Message, state: FSMContext):
-    if Registred.login not in lists.id_user and Registred.user_OK is False:
-        await msg.answer(
-            text=f"Увы. Нет доступа к внутренней информации :("
-        )
-        await state.clear()
-        return
-    if Info.city is None:
-        await msg.reply(f"Ошибка: не указан адрес")
-        await state.clear()
-        return
-
+    """download photo"""
     await bot.download(
         msg.photo[-1],
         destination=f"{os.getcwd()}/photos/{Info.form}/{Info.city}/{Info.street}/{Info.home}/"
                     f"{Info.apartment}/{msg.photo[-1].file_id}+{msg.date}.jpg"
     )
-    await state.clear()
     return
 
 @dp.message(Command("view"))
-async def send_photo(message: types.Message, command: CommandObject):
-    if Registred.login not in lists.log_admin and Registred.admin_OK is False:
-        await message.answer(
-            text=f"Нет доступа к внутренней информации. Требуются расширенные права"
-        )
-        return
+@token_required
+async def send_photo(message: types.Message, command: CommandObject, state: FSMContext):
+    """view photo in directory"""
     if command.args is None:
         await message.answer(
             "Ошибка: не переданы аргументы"
@@ -233,14 +239,27 @@ async def send_photo(message: types.Message, command: CommandObject):
             "/send fttx/Город/улица/дом/квартира(для ТО, подьезд/подвал,чердак)"
         )
         return
-    await Repo.insert_into_visited_date(Registred.name,
-                                        f"Посмотрел фото в "
-                                        f"{Info.form}/{Info.city}/{Info.street}/{Info.home}/{Info.apartment}")
+
+    data = await state.get_data()
+    token = data.get("jwt_token")
+    if not token:
+        await message.answer("Нет токена. Пройдите авторизацию через /start.")
+        return
+
+    decoded_data = await decode_jwt_token(token)
+    full_name = decoded_data.get("name") if decoded_data else None
+
+    await Repo.insert_into_visited_date(
+        full_name,
+        f"Посмотрел фото в {Info.form}/{Info.city}/{Info.street}/{Info.home}/{Info.apartment}"
+    )
+
     if not os.path.isdir(images_folder):
         await message.answer(
             "Запрашиваемая директория отсутствует.\nНабери /help"
         )
         return
+
     images = [f for f in os.listdir(images_folder) if f.endswith(('jpg', 'jpeg', 'png', 'gif'))]
     if images:
         for row in images:
@@ -251,9 +270,16 @@ async def send_photo(message: types.Message, command: CommandObject):
         await message.reply("В папке нет изображений.\nНабери /help")
     return
 
+@dp.message(Command("exit"))
+async def cmd_logout(message: types.Message, state: FSMContext):
+    """exit"""
+    await state.clear()
+    await message.answer("Вы вышли из системы. Чтобы снова войти, используйте /start.")
+
+
 async def main():
+    """start"""
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
