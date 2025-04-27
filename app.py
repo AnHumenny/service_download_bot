@@ -23,17 +23,13 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-class SelectInfo(StatesGroup):
-    """registered user"""
-    register_user = State()
-
 class AuthStates(StatesGroup):
-    """states for authentication and output"""
+    """States for authentication and output"""
     waiting_for_login = State()
     waiting_for_password = State()
 
 class Form(StatesGroup):
-    """token (state: FSMContext)"""
+    """Token (state: FSMContext)"""
     waiting_for_token = State()
 
 class Info:
@@ -47,16 +43,16 @@ class Info:
 
 
 async def create_jwt_token(data):
-    """create token"""
+    """Create token"""
     token = jwt.encode({
         **data,
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+        'exp': datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1)
     }, os.getenv("SECRET_KEY"), algorithm='HS256')
     return token
 
 
 async def decode_jwt_token(token):
-    """decode token"""
+    """Decode token"""
     try:
         decoded_data = jwt.decode(token, os.getenv("SECRET_KEY"), algorithms=['HS256'])
         return decoded_data
@@ -69,7 +65,7 @@ async def decode_jwt_token(token):
 
 
 def token_required(func):
-    """check token"""
+    """Check token in status user"""
     @wraps(func)
     async def wrapper(message: types.Message, state: FSMContext, *args, **kwargs):
         data = await state.get_data()
@@ -85,15 +81,39 @@ def token_required(func):
             return None
     return wrapper
 
+
+def token_required_admin(func):
+    """Check token in status admin"""
+    @wraps(func)
+    async def wrapper(message: types.Message, state: FSMContext, *args, **kwargs):
+        data = await state.get_data()
+        token = data.get("jwt_token")
+        status = data.get("status")
+        if not token:
+            await message.answer("Нет сохранённого токена. Пройдите авторизацию через /start.")
+            return None
+        if status == "admin":
+            await message.answer("Недостаточно прав доступа.")
+            return None
+        decoded_data = await decode_jwt_token(token)
+        if decoded_data:
+            return await func(message, state=state, *args, **kwargs)
+        else:
+            await message.answer("Токен недействителен или истёк. Авторизуйтесь снова.")
+            return None
+    return wrapper
+
+
 @dp.message(StateFilter(None), Command("start"))
 async def start_handler(message: types.Message, state: FSMContext):
-    """start(enter login)"""
+    """Start(enter login)"""
     await message.answer("Введите логин:")
     await state.set_state(AuthStates.waiting_for_login)
 
+
 @dp.message(AuthStates.waiting_for_login)
 async def process_login(message: types.Message, state: FSMContext):
-    """start(enter password)"""
+    """Start(enter password)"""
     await state.update_data(login=message.text)
     await message.answer("Теперь введите пароль:")
     await state.set_state(AuthStates.waiting_for_password)
@@ -101,6 +121,7 @@ async def process_login(message: types.Message, state: FSMContext):
 
 @dp.message(AuthStates.waiting_for_password)
 async def process_password(message: types.Message, state: FSMContext):
+    """Authorization"""
     user_data = await state.get_data()
     login = user_data.get('login')
     password = message.text
@@ -121,6 +142,7 @@ async def process_password(message: types.Message, state: FSMContext):
             Info.count = 0
             await state.clear()
             return
+
     if result:
         user_payload = {
             'login': result.login,
@@ -146,6 +168,15 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(*lists.send)
 
 
+async def check_args(text):
+    """Check path to create folder"""
+    result = ''
+    parts = text.split(' ', 1)
+    if len(parts) == 2:
+        rest = parts[1]
+        result = rest.replace(' ', '_')
+    return result
+
 @dp.message(Command("send"))
 @token_required
 async def cmd_send_photo(message: Message, command: CommandObject, state: FSMContext):
@@ -155,6 +186,9 @@ async def cmd_send_photo(message: Message, command: CommandObject, state: FSMCon
             "Ошибка: не переданы аргументы"
         )
         return
+
+    check_arg = await check_args(message.text)
+
     try:
         Info.form, Info.city, Info.street, Info.home, Info.apartment = command.args.split("/", maxsplit=4)
         if Info.city not in lists.city:
@@ -168,28 +202,24 @@ async def cmd_send_photo(message: Message, command: CommandObject, state: FSMCon
             "/send fttx/Город/улица/дом/квартира(для ТО, подьезд/подвал, техэтаж, (иное))"
         )
         return
-    dir_name = ""
-    if Info.form == "fttx":
-        dir_name = f"photos/fttx/{Info.city}/{Info.street}/{Info.home}/{Info.apartment}"
-    if Info.form == "to":
-        dir_name = f"photos/to/{Info.city}/{Info.street}/{Info.home}/{Info.apartment}"    #aparnment == entrance
-    if Info.form == "FTTX":
-        dir_name = f"photos/FTTX/{Info.city}/{Info.street}/{Info.home}/{Info.apartment}"    #aparnment == entrance
+
     if (any(c in r'/\:*?"<>|' for c in Info.apartment) or any(c in r'/\:*?"<>|' for c in Info.home) or
-            any(c in r'/\:*?"<>|' for c in Info.street) or any(c in r'/\:*?"<>|' for c in Info.city)):
+            any(c in r'/\:*?"<>|' for c in Info.street) or any(c in r'/\:*?"<>|' for c in Info.city)):    #как варик, на запрет просто добавить в регулярку пробел
         await message.reply("Недопустимое имя директории!")
         return
-    process = await asyncio.create_subprocess_shell(f"mkdir -p {dir_name}", stdout=subprocess.PIPE,
+
+    process = await asyncio.create_subprocess_shell(f"mkdir -p photos/{check_arg}", stdout=subprocess.PIPE,
                                                     stderr=subprocess.PIPE)
+    await state.update_data(check_arg=check_arg)
     stdout, stderr = await process.communicate()
     if process.returncode == 0:
-        await message.reply(f"Директория '{dir_name}' существует.")
+        await message.reply(f"Директория '{check_arg}' существует.")
     else:
         error_message = stderr.decode().strip() or "Ошибка при создании директории."
         await message.reply(f"Ошибка: {error_message}")
         return
     await message.answer(
-        f"Фото будут загружен в {Info.city}/{Info.street}/{Info.home}/{Info.apartment}\n"
+        f"Фото будут загружен в {check_arg}\n"
         f"Выберите и отправьте фотографии"
     )
 
@@ -202,22 +232,27 @@ async def cmd_send_photo(message: Message, command: CommandObject, state: FSMCon
     decoded_data = await decode_jwt_token(token)
     full_name = decoded_data.get("name") if decoded_data else None
     await Repo.insert_into_visited_date(full_name,
-                                        f"Добавил фото в "
-                                        f"{Info.form}/{Info.city}/{Info.street}/{Info.home}/{Info.apartment}")
+                                        f"Добавил фото в f'photos/{check_arg}'")
+
 
 @dp.message(F.photo)
 @token_required
 async def view_3(msg: Message, state: FSMContext):
-    """download photo"""
+    """Download photo"""
+    data = await state.get_data()
+    check_arg = data.get("check_arg")
+    if not check_arg:
+        await msg.answer("Ошибка: не найдена папка для сохранения фото.")
+        return
     await bot.download(
         msg.photo[-1],
-        destination=f"{os.getcwd()}/photos/{Info.form}/{Info.city}/{Info.street}/{Info.home}/"
-                    f"{Info.apartment}/{msg.photo[-1].file_id}+{msg.date}.jpg"
+        destination=f"{os.getcwd()}/photos/{check_arg}/{msg.photo[-1].file_id}+{msg.date}.jpg"
     )
     return
 
+
 @dp.message(Command("view"))
-@token_required
+@token_required_admin
 async def send_photo(message: types.Message, command: CommandObject, state: FSMContext):
     """view photo in directory"""
     if command.args is None:
@@ -225,9 +260,16 @@ async def send_photo(message: types.Message, command: CommandObject, state: FSMC
             "Ошибка: не переданы аргументы"
         )
         return
+
+    data = await state.get_data()
+    check_arg = data.get("check_arg")
+    if not check_arg:
+        await message.answer("Ошибка: не найдена папка для просмотра фото.")
+        return
+
     try:
         Info.form, Info.city, Info.street, Info.home, Info.apartment = command.args.split("/", maxsplit=4)
-        images_folder = f'photos/{Info.form}/{Info.city}/{Info.street}/{Info.home}/{Info.apartment}/'
+        images_folder = f'photos/{check_arg}/'
         if Info.city not in lists.city:
             await message.answer(
                 f"Ошибка: неправильный формат города : {Info.city}"
@@ -251,7 +293,7 @@ async def send_photo(message: types.Message, command: CommandObject, state: FSMC
 
     await Repo.insert_into_visited_date(
         full_name,
-        f"Посмотрел фото в {Info.form}/{Info.city}/{Info.street}/{Info.home}/{Info.apartment}"
+        f"Посмотрел фото в photos/{check_arg}"
     )
 
     if not os.path.isdir(images_folder):
@@ -270,6 +312,7 @@ async def send_photo(message: types.Message, command: CommandObject, state: FSMC
         await message.reply("В папке нет изображений.\nНабери /help")
     return
 
+
 @dp.message(Command("exit"))
 async def cmd_logout(message: types.Message, state: FSMContext):
     """exit"""
@@ -280,6 +323,7 @@ async def cmd_logout(message: types.Message, state: FSMContext):
 async def main():
     """start"""
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
