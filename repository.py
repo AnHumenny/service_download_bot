@@ -9,7 +9,7 @@ class Repo:
         async with new_session() as session:
             pswrd = psw.decode("UTF-8")
             password = str(pswrd)
-            q = select(DUser).where(DUser.login == login, DUser.password == password)
+            q = select(DUser).where(DUser.login == login, DUser.password == password)  #type: ignore
             result = await session.execute(q)
             answer = result.scalar()
             await session.close()
@@ -24,4 +24,3 @@ class Repo:
             session.add(q)
             await session.commit()
             await session.close()
-

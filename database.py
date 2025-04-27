@@ -32,5 +32,5 @@ class DUser(Model):
 
 class DVisitedUser(Model):
     __tablename__ = "_visited_users"
-    date_created = Column(DateTime(timezone=False))
+    date_created = Column(DateTime(timezone=True))
     action = Column(String(50))
