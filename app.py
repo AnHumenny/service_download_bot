@@ -2,9 +2,9 @@ import asyncio
 import datetime
 import logging
 from functools import wraps
-import jwt
 from aiogram import Bot, Dispatcher, types
 import os
+import jwt
 import base64
 from aiogram import F
 from aiogram.fsm.context import FSMContext
@@ -196,10 +196,15 @@ async def cmd_send_photo(message: Message, command: CommandObject, state: FSMCon
                 f"Ошибка: неправильный формат города : {Info.city}"
             )
             return
+
+        if Info.form not in lists.err:
+            await message.answer("Ошибка: выбран некорректный тип работ.")
+            return
+
     except ValueError:
         await message.answer(
             "Ошибка: неправильный формат команды. Пример:\n"
-            "/send fttx/Город/улица/дом/квартира(для ТО, подьезд/подвал, техэтаж, (иное))"
+            "/send физ/Город/улица/дом/квартира(для ТО, подьезд/подвал, техэтаж, (иное))"
         )
         return
 
@@ -275,10 +280,11 @@ async def send_photo(message: types.Message, command: CommandObject, state: FSMC
                 f"Ошибка: неправильный формат города : {Info.city}"
             )
             return
+
     except ValueError:
         await message.answer(
             "Ошибка: неправильный формат команды. Пример:\n"
-            "/send fttx/Город/улица/дом/квартира(для ТО, подьезд/подвал,чердак)"
+            "/send физ/Город/улица/дом/квартира(для ТО, подьезд/подвал,чердак)"
         )
         return
 
