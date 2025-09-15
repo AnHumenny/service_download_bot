@@ -12,7 +12,7 @@ user = os.getenv('user')
 password = os.getenv('password')
 database = os.getenv('database')
 
-DATABASE_URL = f"postgresql+asyncpg://{user}:{password}@{host}/{database}"  #service основного проекта(_userbot, _visited_users)
+DATABASE_URL = f"postgresql+asyncpg://{user}:{password}@{host}/{database}"
 
 engine = create_async_engine(url=DATABASE_URL)
 new_session = async_sessionmaker(engine, expire_on_commit=False)
@@ -25,7 +25,7 @@ class DUser(Model):
     __tablename__ = "_userbot"
     name = Column(String(30))
     status = Column(String(15))
-    password = Column(String)
+    password = Column(String(100))
     phone = Column(String(14))
     email = Column(String(50))
     tg_id = Column(String(50))
