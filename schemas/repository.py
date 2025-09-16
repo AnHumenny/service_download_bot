@@ -1,18 +1,16 @@
 from datetime import datetime
 from sqlalchemy import select
-from database import DUser, DVisitedUser, new_session
+from schemas.database import DUser, DVisitedUser, new_session
 
 class Repo:
     @classmethod
-    async def select_pass(cls, login, psw):
+    async def select_pass(cls, login, psw, tg_id):
         """authorization"""
         async with new_session() as session:
-            pswrd = psw.decode("UTF-8")
-            password = str(pswrd)
-            q = select(DUser).where(DUser.login == login, DUser.password == password)  #type: ignore
+            q = select(DUser).where(DUser.login == login, DUser.password == psw,
+                                    DUser.tg_id == str(tg_id))
             result = await session.execute(q)
             answer = result.scalar()
-            await session.close()
             return answer
 
     @classmethod
