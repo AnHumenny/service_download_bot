@@ -42,5 +42,5 @@ if __name__ == "__main__":
         password = "q",
         phone = "333333",
         email = "email@email.com",
-        tg_id = "408397675"
+        tg_id = "408395"
     )

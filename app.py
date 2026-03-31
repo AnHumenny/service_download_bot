@@ -1,26 +1,18 @@
 import asyncio
-from itertools import combinations
-
-import jwt
-import datetime
-import hashlib
-from functools import wraps
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 import os
-
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import BufferedInputFile
 from aiogram.filters import Command, StateFilter
-
 import keyboards
 from lists import lists, lists_admin
-
 from schemas.repository import Repo
 from dotenv import load_dotenv
-from datetime import datetime, timedelta, timezone
-
 import logging
+from utils.jwt_utils import create_jwt_token, token_required, decode_jwt_token
+from utils.keyboard_utils import create_password_keyboard, create_letters_keyboard
+from utils.password_utils import process_final_password, update_password_display, hash_password
+from utils.storage import user_temp_passwords, AuthStates, Info, Operation, Simular
 
 load_dotenv()
 API_TOKEN = os.getenv('API_TOKEN')
@@ -29,80 +21,74 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-class AuthStates(StatesGroup):
-    """States for authentication and output"""
-    waiting_for_login = State()
-    waiting_for_password = State()
-    waiting_for_photos = State()
 
-class Form(StatesGroup):
-    """Token (state: FSMContext)"""
-    waiting_for_token = State()
+@dp.callback_query(F.data.startswith("pass_"), AuthStates.waiting_for_password)
+async def process_password_input(callback: types.CallbackQuery, state: FSMContext):
+    """Password entry processing via buttons."""
+    user_id = callback.from_user.id
+    full_data = callback.data
+    action = full_data.split("_")[1]
 
-class Info:
-    """Variables for throwing"""
-    form = None
-    city = None
-    street = None
-    home = None
-    apartment = None
-    count = 0
+    if user_id not in user_temp_passwords:
+        user_temp_passwords[user_id] = ""
 
-class Simular(StatesGroup):
-    view_first_folder = State()
-    view_second_folder = State()
+    if full_data.startswith("pass_mode_"):
+        mode = full_data.split("_")[2]
+        if mode == "digits":
+            keyboard = create_password_keyboard(user_temp_passwords, user_id)
+        elif mode == "letters":
+            keyboard = await create_letters_keyboard("letters")
+        elif mode == "caps":
+            keyboard = await create_letters_keyboard("caps")
 
-class Operation(StatesGroup):
-    send_photo = State()
-    view_photo = State()
+        masked_password = "•" * len(user_temp_passwords[user_id])
+        await callback.message.edit_text(
+            f"Введите пароль:\n\nПароль: {masked_password}",
+            reply_markup=keyboard
+        )
+        await callback.answer()
+        return
 
+    if action == "back":
+        user_temp_passwords[user_id] = user_temp_passwords[user_id][:-1]
+    elif action == "enter":
+        await process_final_password(callback, state)
+        return
+    elif action == "cancel":
+        await callback.message.edit_text("❌ Ввод пароля отменен")
+        await state.clear()
+        if user_id in user_temp_passwords:
+            del user_temp_passwords[user_id]
+        return
+    else:
+        if len(user_temp_passwords[user_id]) < 20:
+            symbol = action
+            user_temp_passwords[user_id] += symbol
 
-async def create_jwt_token(data):
-    """Create token"""
-    token = jwt.encode({
-        **data,
-        'exp': datetime.now(tz=timezone.utc) + timedelta(hours=2)
-    }, os.getenv("SECRET_KEY"), algorithm='HS256')
-    return token
+    await update_password_display(callback)
 
-
-async def decode_jwt_token(token):
-    """Decode token"""
-    try:
-        decoded_data = jwt.decode(token, os.getenv("SECRET_KEY"), algorithms=['HS256'])
-        return decoded_data
-    except jwt.ExpiredSignatureError:
-        return None
-    except jwt.InvalidTokenError:
-        return None
-
-
-def token_required(admin_only=False):
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(message: types.Message, state: FSMContext, *args, **kwargs):
-            data = await state.get_data()
-            token = data.get("jwt_token")
-            if not token:
-                await message.answer("Нет сохранённого токена. Пройдите авторизацию через /start.")
-                return None
-            decoded_data = await decode_jwt_token(token)
-            if not decoded_data:
-                await message.answer("Токен недействителен или истёк. Авторизуйтесь снова.")
-                return None
-            status = decoded_data.get("status")
-            if admin_only and status != "admin":
-                await message.answer("Доступ запрещён. Требуются права администратора.")
-                return None
-            return await func(message, state=state, decoded_data=decoded_data, *args, **kwargs)
-        return wrapper
-    return decorator
 
 @dp.message(StateFilter(None), Command("start"))
 async def start_handler(message: types.Message, state: FSMContext):
     """Start(enter login)"""
+    await message.answer("Введите логин:")
     await state.set_state(AuthStates.waiting_for_login)
-    await message.answer("Введите ваш логин:")
+
+
+@dp.message(AuthStates.waiting_for_login)
+async def process_login(message: types.Message, state: FSMContext):
+    """Switching to entering the password via the keyboard."""
+    await state.update_data(username=message.text)
+
+    user_temp_passwords[message.from_user.id] = ""
+
+    keyboard = create_password_keyboard(user_temp_passwords, message.from_user.id)
+    await message.answer(
+        "Теперь введите пароль используя кнопки ниже:\n\n"
+        "Пароль: ••••••",
+        reply_markup=keyboard
+    )
+    await state.set_state(AuthStates.waiting_for_password)
 
 
 @dp.message(AuthStates.waiting_for_login)
@@ -112,10 +98,6 @@ async def process_login(message: types.Message, state: FSMContext):
     await message.answer("Теперь введите пароль:")
     await state.set_state(AuthStates.waiting_for_password)
 
-
-def hash_password(password: str) -> str:
-    """Hashing password."""
-    return hashlib.sha256(password.encode()).hexdigest()
 
 @dp.message(AuthStates.waiting_for_login)
 async def process_login(message: types.Message, state: FSMContext):
@@ -177,6 +159,7 @@ async def process_password(message: types.Message, state: FSMContext):
                  f"Напиши /admin_help для доступа к админ-командам или /help для общих команд."
         )
     else:
+        await Repo.insert_into_visited_date(result.login, f"зашёл в бота", None)
         await message.answer(
             text=f"Добро пожаловать, {result.login}!\n"
                  f"Напиши /help для списка доступных команд."
@@ -208,14 +191,6 @@ async def admin_help(message: types.Message, state: FSMContext, decoded_data: di
         text=f"Команды для {decoded_data.get('login', 'Unknown')}:\n"
              f"{response}"
     )
-
-
-async def check_args(text: str) -> str:
-    """Generates a path from the command arguments."""
-    parts = text.split()[1:]
-    if not parts:
-        return ""
-    return "/".join(parts)
 
 
 @dp.message(Command("send"))
@@ -311,6 +286,7 @@ async def process_photo(message: types.Message, state: FSMContext):
             return
 
         await message.bot.download_file(file.file_path, file_path)
+        await Repo.insert_into_visited_date(login, f"Добавил фото в {file_path}", photo.file_unique_id)
         await message.answer(f"Фотография сохранена в {file_path}")
 
 
@@ -319,7 +295,6 @@ async def process_photo(message: types.Message, state: FSMContext):
         return
     await state.update_data(check_arg=None, first_folder=None, second_folder=None)
     await state.set_state(AuthStates.waiting_for_photos)
-
 
 
 @dp.message(Command("view"))
@@ -389,131 +364,57 @@ async def view_photo(message: types.Message, state: FSMContext, decoded_data: di
             await state.set_state(None)
 
 
-def similar(a, b):
-    """Сравнивает два имени файлов и возвращает True, если они идентичны."""
-    return a.lower() == b.lower()
-
-
-def find_similar_filenames(folders):
-    """Searches for files with the same name in the specified folders."""
-    all_files = []
-    for folder in folders:
-        try:
-            if not os.path.isdir(folder):
-                continue
-            for root, _, files in os.walk(folder):
-                for file in files:
-                    if file.lower().endswith(('jpg', 'jpeg', 'png', 'gif')):
-                        all_files.append((file, os.path.join(root, file)))
-        except Exception as e:
-            return e
-
-    similar_pairs = []
-    for (file1, path1), (file2, path2) in combinations(all_files, 2):
-        if similar(file1, file2):
-            similar_pairs.append((file1, path1, file2, path2))
-
-    return similar_pairs
-
-
 @dp.message(Command("simular"))
 @token_required(admin_only=True)
 async def check_simular(message: types.Message, state: FSMContext, decoded_data: dict):
-    """Search simular filenames."""
-    folders = [os.getenv('PATH_TO_FOLDER_1'), os.getenv('PATH_TO_FOLDER_2')]
-    await message.answer(
-        text="Выберите первую папку: ",
-        reply_markup=keyboards.make_row_keyboard(folders)
-    )
-    await state.set_state(Simular.view_first_folder)
-
-
-@dp.message(Command("check_simular_first"))
-@token_required(admin_only=True)
-async def check_simular_first(message: types.Message, state: FSMContext, decoded_data: dict):
-    """Инициирует выбор первой папки для сравнения."""
-    await state.update_data(check_arg=None, first_folder=None, second_folder=None)
-
-    await message.answer(
-        text="Введите маршрут к первой папке для сравнения :"
-    )
-    await state.set_state(Simular.view_first_folder)
-
-
-@dp.message(StateFilter(Simular.view_first_folder))
-async def select_second_folder(message: types.Message, state: FSMContext):
-    """Processes the selection of the first folder and requests the second one."""
-    first_folder = message.text.strip()
-
+    """Search duplicate hash_name in database."""
     try:
-        parts = first_folder.split("/", maxsplit=4)
-        if len(parts) != 5:
-            raise ValueError("Недостаточно частей в пути")
+        stats = await Repo.get_duplicate_statistics()
 
-        form, city, street, home, apartment = parts
-
-        if city not in lists.city:
-            await message.answer(f"Ошибка: неправильный формат города: {city}")
+        if stats['duplicate_count'] == 0:
+            await message.answer(
+                "✅ **Дубликаты не найдены**\n\n"
+                f"📊 Статистика:\n"
+                f"• Всего записей: {stats['total_records']}\n"
+                f"• Уникальных hash: {stats['unique_hashes']}"
+            )
             return
 
-        if form not in lists.err:
-            await message.answer("Ошибка: выбран некорректный тип работ.")
-            return
-
-        if any(c in r'/\:*?"<>|' for c in (apartment + home + street + city + form)):
-            await message.answer("Недопустимое имя директории!")
-            return
-
-    except ValueError as e:
-        await message.answer(
-            "Ошибка: неправильный формат пути. Пример:\n"
-            "Физ/Город/Улица/Дом/Квартира(для ТО, подъезд/подвал, техэтаж, (иное))"
+        response = (
+            f"🔍 **Найдено {stats['duplicate_count']} дубликатов**\n"
+            f"📊 **Статистика:**\n"
+            f"• Всего записей: {stats['total_records']}\n"
+            f"• Уникальных hash: {stats['unique_hashes']}\n"
+            f"• Дублирующихся записей: {stats['duplicate_records_count']}\n\n"
         )
-        return
 
-    await state.update_data(check_arg=None, first_folder=first_folder)
+        duplicates = await Repo.find_duplicate_hash_names()
 
-    await message.answer(
-        text="Введите путь к второй папке для сравнения (в формате Физ/Город/Улица/Дом/Квартира):"
-    )
-    await state.set_state(Simular.view_second_folder)
+        for i, dup in enumerate(duplicates, 1):
+            response += f"📌 **Дубликат #{i}** (встречается {dup['count']} раз)\n"
+            response += f"`hash: {dup['hash_name'][:40]}...`\n" if len(
+                dup['hash_name']) > 40 else f"`hash: {dup['hash_name']}`\n"
+            response += "**Записи:**\n"
 
+            for j, record in enumerate(dup['records'], 1):
+                response += f"  {j}. 👤 **{record['login']}**\n"
+                response += f"     📅 {record['date_created'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+                response += f"     📝 {record['action'][:80]}\n"
+                if len(record['action']) > 80:
+                    response += "...\n"
+                response += "\n"
 
-@dp.message(StateFilter(Simular.view_second_folder))
-async def process_folders(message: types.Message, state: FSMContext):
-    """Processes the second folder and searches for similar files."""
-    second_folder = message.text
-    data = await state.get_data()
-    first_folder = data.get("first_folder")
+            response += "─" * 40 + "\n"
 
-    if second_folder == first_folder:
-        await message.answer(
-            "Ошибка: вторая папка не должна совпадать с первой.",
-            reply_markup=keyboards.make_row_keyboard(["маршруты папок совпадать не должны!"])
-        )
-        return
+            if len(response) > 4000:
+                await message.answer(response)
+                response = ""
 
-    folders = [f"photos/{first_folder}", f"photos/{second_folder}"]
+        if response:
+            await message.answer(response)
 
-    for folder in folders:
-        if not os.path.isdir(folder):
-            await message.answer(f"Ошибка: папка '{folder}' не существует.")
-            return
-
-    similar_pairs = find_similar_filenames(folders)
-
-    if similar_pairs:
-        response = "Найдены файлы с одинаковыми именами:\n"
-        for file1, path1, file2, path2 in similar_pairs:
-            response += f"- {file1} ({path1})\n  идентичен {file2} ({path2})\n********************"
-        response += f"\n********************\nКоличество пар: {len(similar_pairs)}\n********************\n"
-    else:
-        response = "Файлов с одинаковыми именами не найдено."
-
-    await message.answer(response)
-
-    await state.update_data(check_arg=None, first_folder=None, second_folder=None)
-    await state.set_state(None)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при поиске дубликатов: {str(e)}")
 
 
 @dp.message(Command("exit"))
