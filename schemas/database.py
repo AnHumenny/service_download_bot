@@ -19,18 +19,22 @@ new_session = async_sessionmaker(engine, expire_on_commit=False)
 
 class Model(DeclarativeBase):
     id = Column(Integer, primary_key=True, autoincrement=True)
-    login = Column(String(30))
+
 
 class DUser(Model):
     __tablename__ = "_userbot"
+    login = Column(String(30), unique=True, index=True)
     name = Column(String(30))
     status = Column(String(15))
     password = Column(String(100))
     phone = Column(String(14))
-    email = Column(String(50))
-    tg_id = Column(String(50))
+    email = Column(String(50), unique=True)
+    tg_id = Column(String(50), unique=True)
+
 
 class DVisitedUser(Model):
     __tablename__ = "_visited_users"
+    login = Column(String(30))
     date_created = Column(DateTime(timezone=True))
-    action = Column(String(50))
+    action = Column(String(200))
+    hash_name = Column(String(200), index=True)
